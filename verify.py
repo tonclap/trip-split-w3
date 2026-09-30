@@ -107,6 +107,24 @@ def rub(amount: Decimal, currency: str) -> Decimal:
     return value.quantize(CENT, rounding=ROUND_HALF_UP)
 
 
+def allocate(value: Decimal, count: int) -> list[Decimal]:
+    """Точное деление на доли: остаток копеек раздаётся первым участникам состава.
+
+    Свой путь к тому же правилу, что `split.allocate()` — на целых копейках, без
+    импорта оттуда: два скрипта должны сходиться в результате, а не в коде."""
+    cents = int((value * 100).to_integral_value(rounding=ROUND_HALF_UP))
+    sign = -1 if cents < 0 else 1
+    base, rest = divmod(abs(cents), count)
+    return [Decimal(sign * (base + (1 if i < rest else 0))) / 100 for i in range(count)]
+
+
+def has_source(sources) -> bool:
+    """Источник есть, если в списке есть хоть одна непустая ссылка: `[""]` — нет.
+
+    Было `if not sources` — проверялась пустота списка, а не его содержимое."""
+    return any(str(s).strip() for s in (sources or []))
+
+
 def check_ledger_against_data(chat: str, messages: set) -> None:
     for rid, _date, payer, amount, cur, share, what, sources in LEDGER:
         path = RECEIPTS / f"{rid}.txt"
@@ -127,7 +145,7 @@ def check_ledger_against_data(chat: str, messages: set) -> None:
             fail(f"{rid}: в чеке {receipt['count']} чел., в реестре делим на {len(share)} "
                  f"({', '.join(share)})")
 
-        if not sources:
+        if not has_source(sources):
             fail(f"{rid}: строка реестра без источника")
             continue
         missing = [m for m in sources if m not in messages]
@@ -147,7 +165,7 @@ def check_ledger_against_data(chat: str, messages: set) -> None:
 
     for mv in MONEY_MOVES:
         src, dst, amount, cur, kind, _note, sources = mv
-        if not sources:
+        if not has_source(sources):
             fail(f"движение {src}→{dst} {amount} {cur} без источника")
             continue
         missing = [m for m in sources if m not in messages]
@@ -176,13 +194,12 @@ def balances_pairwise() -> dict:
 
     for rid, _date, payer, amount, cur, share, _what, _src in LEDGER:
         value = rub(Decimal(str(amount)), cur)
-        per = (value / len(share)).quantize(CENT, rounding=ROUND_HALF_UP)
-        if per * len(share) != value:
-            fail(f"{rid}: {value} ₽ не делится на {len(share)} без остатка "
-                 f"({per} x {len(share)} = {per * len(share)})")
-        for person in share:
+        parts = allocate(value, len(share))
+        if sum(parts) != value:
+            fail(f"{rid}: доли {sum(parts)} ₽ не равны сумме строки {value} ₽")
+        for person, part in zip(share, parts):
             if person != payer:
-                debt[person][payer] += per
+                debt[person][payer] += part
         if len(share) > 1:
             total_shared += value
         else:
